@@ -3,169 +3,178 @@ import pandas as pd
 from datetime import datetime
 import os
 
-def parse_single_day(acc_path, date_str):
+def parse_single_day_expi(acc_path, expi_path, date_str):
     """
-    acc_log에서 매수(Bid)와 매도(Ask) 쌍을 찾아 수익률을 계산하고,
-    진입 시점의 지표(PASS1, Trend 등)를 매칭합니다.
+    [결과 파싱 강화 버전]
+    1. Expi Log: 마켓명 뒤에 숨어있는 ok, x, NB를 강력하게 찾아냅니다.
+    2. Acc Log: PASS 7 시점의 지표 스냅샷을 뜹니다.
+    3. Matching: 시간 순서대로 짝을 짓습니다.
     """
-    if not os.path.exists(acc_path):
-        return pd.DataFrame()
+    
+    clean_date_str = date_str[:10] # YYYY-MM-DD
 
-    # 1. 임시 저장소
-    market_state = {}     # 각 코인의 실시간 지표 상태 저장 (CCTV)
-    open_positions = {}   # 매수 후 매도 대기 중인 상태 { 'KRW-BTC': { 'buy_price': 10000, 'buy_time': ... } }
-    completed_trades = [] # 매도까지 완료된 거래 기록
+    # --- 1. Expi 결과 파일 파싱 (여기가 수정됨) ---
+    expi_events = []
+    
+    # 파일 경로 찾기
+    real_expi_path = expi_path
+    if not os.path.exists(real_expi_path):
+        dir_name = os.path.dirname(acc_path)
+        alt_path = os.path.join(dir_name, "Expi.txt")
+        if os.path.exists(alt_path):
+            real_expi_path = alt_path
+    
+    if os.path.exists(real_expi_path):
+        with open(real_expi_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line: continue
+                
+                # 시간 파싱
+                time_match = re.search(r'\[(\d{2}:\d{2}:\d{2}\.\d{3})\]', line)
+                # 마켓 파싱
+                market_match = re.search(r'(KRW-[A-Z0-9]+)', line)
+                
+                if time_match and market_match:
+                    time_str = time_match.group(1)
+                    market = market_match.group(1)
+                    
+                    # [핵심 수정] 마켓명 뒤의 텍스트에서 결과 찾기
+                    # 기존 정규식보다 훨씬 단순하고 강력하게 처리
+                    result = "unknown"
+                    
+                    # 라인을 소문자로 바꿔서 ok, x, nb 찾기 (대소문자 무시)
+                    lower_line = line.lower()
+                    
+                    # 마켓명 뒷부분만 잘라서 확인 (마켓명이 오탐되는 것 방지)
+                    parts = lower_line.split(market.lower())
+                    if len(parts) > 1:
+                        suffix = parts[-1] # 마켓명 뒤에 있는 모든 글자
+                        
+                        # 우선순위: 명확한 단어부터 체크
+                        if "ok" in suffix: result = "ok"
+                        elif "nb" in suffix: result = "NB"
+                        # x는 단어 단위로 체크 (ex라는 단어에 포함될 수 있으므로)
+                        elif re.search(r'\bx\b', suffix): result = "x" 
+                        elif "x" in suffix and len(suffix.strip()) < 5: result = "x" # 짧은 문장에 x 있으면 x로 간주
 
-    # 2. 로그 읽기
+                    try:
+                        dt = datetime.strptime(f"{clean_date_str} {time_str}", "%Y-%m-%d %H:%M:%S.%f")
+                        expi_events.append({'expi_time': dt, 'market': market, 'result': result})
+                    except ValueError:
+                        continue
+
+    # --- 2. Acc 로그 파싱 (PASS 7 스냅샷) ---
+    if not os.path.exists(acc_path): return pd.DataFrame()
+
+    # 지표 추출용 정규식
+    patterns = {
+        'pass1_avg': re.compile(r'PASS 1 prevAccTradePrice12Avg\s+KRW.*\/ ([\d\.E\+\-]+)'),
+        'pass1_cur': re.compile(r'PASS 1 targetVo\.getAccTradePrice1min\(\).*\/ ([\d\.E\+\-]+)'),
+        'wideTrendAvg': re.compile(r'wideTrendAvg\s*:\s*([\d\.E\+\-]+)'),
+        'wideTrendAvg2': re.compile(r'wideTrendAvg2\s*:\s*([\d\.E\+\-]+)'),
+        'crossAvg': re.compile(r'BID crossAvg\s*:\s*([\d\.E\+\-]+)'),
+        'trendAvg': re.compile(r'trendAvg\s*:\s*([\d\.E\+\-]+)'),
+        'upRate': re.compile(r'BID upRate\s*:\s*([\d\.E\+\-]+)'),
+        'fastRate': re.compile(r'fastRate\s*:\s*([\d\.E\+\-]+)'),
+        'bid5_24h': re.compile(r'BID 5 targetVo\.getAccTradePrice24h\(\).*\/ ([\d\.E\+\-]+)'),
+        'bid5_prev': re.compile(r'BID 5 prevAccTradePrice.*\/ ([\d\.E\+\-]+)'),
+    }
+
+    live_state = {}
+    entry_events = []
+
     with open(acc_path, 'r', encoding='utf-8') as f:
         for line in f:
-            # 시간 파싱
+            line = line.strip()
+            if not line: continue
+
             time_match = re.search(r'\[(\d{2}:\d{2}:\d{2}\.\d{3})\]', line)
             if not time_match: continue
             
-            current_time_str = f"{date_str} {time_match.group(1)}"
             try:
-                current_dt = datetime.strptime(current_time_str, "%Y-%m-%d %H:%M:%S.%f")
-            except:
-                continue # 날짜 파싱 에러 시 스킵
+                current_dt = datetime.strptime(f"{clean_date_str} {time_match.group(1)}", "%Y-%m-%d %H:%M:%S.%f")
+            except ValueError:
+                continue
 
-            # 마켓 추출
             market_match = re.search(r'(KRW-[A-Z0-9]+)', line)
-            market = market_match.group(1) if market_match else None
+            if not market_match: continue
+            market = market_match.group(1)
 
-            # -----------------------------------------------------------
-            # [A] 지표 파싱 (매수 전 상태를 알기 위해 계속 업데이트)
-            # -----------------------------------------------------------
-            if market:
-                if market not in market_state: market_state[market] = {}
+            if market not in live_state: live_state[market] = {}
+
+            # 지표 업데이트
+            for key, pattern in patterns.items():
+                m = pattern.search(line)
+                if m:
+                    try: live_state[market][key] = float(m.group(1))
+                    except: pass
+
+            # 진입 트리거
+            if 'BID PASS 7 minus 2 candles' in line:
+                snapshot = live_state.get(market, {}).copy()
+                snapshot['market'] = market
+                snapshot['entry_time'] = current_dt
                 
-                # 정규식 패턴 모음
-                patterns = {
-                    'pass1_avg': r'prevAccTradePrice12Avg.*?/\s*([\d\.E]+)',
-                    'pass1_1min': r'getAccTradePrice1min\(\).*?/\s*([\d\.E]+)',
-                    'bid5_24h': r'getAccTradePrice24h\(\).*?/\s*([\d\.E]+)',
-                    'bid5_total': r'total candles acc trade price.*?/\s*([\d\.E]+)',
-                    'wideTrendAvg': r'wideTrendAvg\s*:\s*([\d\.]+)',
-                    'trendAvg': r'trendAvg\s*:\s*([\d\.]+)',
-                    'fastRate': r'fastRate\s*:\s*([\d\.\-]+)',
-                    'upRate': r'upRate\s*:\s*([\d\.\-]+)'
-                }
+                # 비율 계산
+                p1_c = snapshot.get('pass1_cur', 0)
+                p1_a = snapshot.get('pass1_avg', 0)
+                snapshot['PASS1_Ratio'] = p1_c / p1_a if p1_a != 0 else 0
+
+                b5_p = snapshot.get('bid5_prev', 0)
+                b5_24 = snapshot.get('bid5_24h', 0)
+                snapshot['BID5_Ratio'] = b5_p / b5_24 if b5_24 != 0 else 0
                 
-                for key, pat in patterns.items():
-                    if key in line or (key == 'pass1_avg' and 'prevAccTradePrice12Avg' in line):
-                        val = re.search(pat, line)
-                        if val: market_state[market][key] = float(val.group(1))
+                entry_events.append(snapshot)
 
-            # -----------------------------------------------------------
-            # [B] 매수(BUY) 감지 - JSON 로그
-            # -----------------------------------------------------------
-            # {"uuid":..., "side":"bid", "ord_type":"price", "price":"10183", ... "market":"KRW-KAVA"}
-            if 'OrdersServiceImpl.bidOrder' in line and '"side":"bid"' in line:
-                try:
-                    # JSON 파싱 대신 정규식으로 안전하게 추출
-                    price_match = re.search(r'"price":"([\d\.]+)"', line)
-                    market_json_match = re.search(r'"market":"(KRW-[A-Z0-9]+)"', line)
-                    
-                    if price_match and market_json_match:
-                        buy_market = market_json_match.group(1)
-                        total_buy_krw = float(price_match.group(1)) # 매수 투입 금액 (예: 10183원)
-                        
-                        # 현재 지표 상태 스냅샷 뜨기
-                        state = market_state.get(buy_market, {}).copy()
-                        
-                        # 지표 계산 (Ratio 등)
-                        p1_1min = state.get('pass1_1min', 0)
-                        p1_avg = state.get('pass1_avg', 0)
-                        state['PASS1_Ratio'] = p1_1min / p1_avg if p1_avg > 0 else 0
-                        
-                        b5_total = state.get('bid5_total', 0)
-                        b5_24h = state.get('bid5_24h', 0)
-                        state['BID5_Ratio'] = b5_total / b5_24h if b5_24h > 0 else 0
+    # --- 3. 매칭 로직 ---
+    if not entry_events: return pd.DataFrame()
+        
+    df_entry = pd.DataFrame(entry_events)
+    df_entry = df_entry.sort_values('entry_time')
+    
+    final_data = []
 
-                        # 매수 포지션 등록
-                        open_positions[buy_market] = {
-                            'buy_time': current_dt,
-                            'buy_krw': total_buy_krw,
-                            'indicators': state
-                        }
-                except Exception as e:
-                    print(f"Buy Parse Error: {e}")
+    for expi in expi_events:
+        expi_t = expi['expi_time']
+        mkt = expi['market']
+        res = expi['result']
+        
+        # Expi 시간 이전에 발생한 해당 마켓의 PASS 찾기
+        candidates = df_entry[
+            (df_entry['market'] == mkt) & 
+            (df_entry['entry_time'] < expi_t)
+        ]
+        
+        if not candidates.empty:
+            # 가장 최근의 PASS를 가져옴
+            match = candidates.iloc[-1].to_dict()
+            
+            match['result'] = res
+            match['timestamp'] = expi_t
+            match['date'] = clean_date_str
+            
+            final_data.append(match)
+            
+    if not final_data: return pd.DataFrame()
 
-            # -----------------------------------------------------------
-            # [C] 매도(SELL) 주문 감지 - JSON 로그
-            # -----------------------------------------------------------
-            # {"uuid":..., "side":"ask", ... "market":"KRW-0G", ... "volume":"4.07272012"}
-            if 'OrdersServiceImpl.askOrder' in line and '"side":"ask"' in line:
-                try:
-                    vol_match = re.search(r'"volume":"([\d\.]+)"', line)
-                    market_json_match = re.search(r'"market":"(KRW-[A-Z0-9]+)"', line)
-                    
-                    if vol_match and market_json_match:
-                        sell_market = market_json_match.group(1)
-                        sell_volume = float(vol_match.group(1)) # 매도한 코인 개수
-                        
-                        # 매수 포지션이 있는지 확인 (짝 맞추기)
-                        if sell_market in open_positions:
-                            open_positions[sell_market]['pending_sell_volume'] = sell_volume
-                            open_positions[sell_market]['sell_start_time'] = current_dt
-                except:
-                    pass
-
-            # -----------------------------------------------------------
-            # [D] 매도(SELL) 체결가 확정 - 텍스트 로그
-            # -----------------------------------------------------------
-            # down ask KRW-0G / 2472.768
-            # highest ask KRW-0G / 2413.0 / ...
-            if 'AskMonitoringServiceImpl' in line and (' ask ' in line):
-                # 패턴: (down ask|up ask|highest ask) (KRW-XXX) / (PRICE)
-                match = re.search(r'(down ask|up ask|highest ask)\s+(KRW-[A-Z0-9]+)\s*/\s*([\d\.]+)', line)
-                if match:
-                    sell_type = match.group(1)
-                    market = match.group(2)
-                    sell_price_per_coin = float(match.group(3)) # 매도 단가
-                    
-                    # 매도 대기 중인 포지션이 있으면 정산
-                    if market in open_positions and 'pending_sell_volume' in open_positions[market]:
-                        pos = open_positions.pop(market) # 포지션 꺼내기 (완료 처리)
-                        
-                        buy_krw = pos['buy_krw']
-                        sell_vol = pos['pending_sell_volume']
-                        
-                        # 수익금 계산: (매도단가 * 개수) - 매수총액
-                        sell_total_krw = sell_price_per_coin * sell_vol
-                        profit_krw = sell_total_krw - buy_krw
-                        yield_pct = (profit_krw / buy_krw) * 100 if buy_krw > 0 else 0
-                        
-                        # 결과 저장
-                        trade_data = {
-                            'date': date_str,
-                            'market': market,
-                            'buy_time': pos['buy_time'],
-                            'sell_time': current_dt,
-                            'buy_krw': buy_krw,
-                            'sell_krw': sell_total_krw,
-                            'profit_krw': profit_krw,
-                            'yield': yield_pct,
-                            'result': 'ok' if profit_krw > 0 else 'x', # 수익이면 ok, 손실이면 x
-                            'sell_type': sell_type
-                        }
-                        # 지표 병합
-                        trade_data.update(pos['indicators'])
-                        completed_trades.append(trade_data)
-
-    return pd.DataFrame(completed_trades)
+    result_df = pd.DataFrame(final_data)
+    
+    # 보기 좋게 컬럼 정렬
+    cols = ['date', 'timestamp', 'market', 'result', 'PASS1_Ratio', 'BID5_Ratio', 
+            'wideTrendAvg', 'wideTrendAvg2', 'crossAvg', 'trendAvg', 'upRate', 'fastRate']
+    exist_cols = [c for c in cols if c in result_df.columns]
+    
+    return result_df[exist_cols]
 
 def load_all_data(data_dir, date_list):
-    """여러 날짜의 데이터를 통합 로드"""
     all_dfs = []
     for date_str in date_list:
         acc_file = os.path.join(data_dir, f"acc_log.{date_str}.txt")
+        expi_file = os.path.join(data_dir, f"Expi.{date_str}.txt")
+        
         if os.path.exists(acc_file):
-            df = parse_single_day(acc_file, date_str)
-            if not df.empty:
-                all_dfs.append(df)
-    
-    if all_dfs:
-        return pd.concat(all_dfs, ignore_index=True)
-    else:
-        return pd.DataFrame()
+            df = parse_single_day_expi(acc_file, expi_file, date_str)
+            if not df.empty: all_dfs.append(df)
+            
+    return pd.concat(all_dfs, ignore_index=True) if all_dfs else pd.DataFrame()
