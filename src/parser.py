@@ -20,6 +20,9 @@ def parse_single_day_expi(acc_path, date_str):
         'bid5_prev': re.compile(r'BID 5 prevAccTradePrice.*\/ ([\d\.E\+\-]+)'),
     }
 
+    # price 2 패턴 (공백 및 형식에 유연하게 대응)
+    price2_pattern = re.compile(r'price 2\s*:\s*[A-Z0-9-]+\s*/\s*([\d\.E\+\-]+)\s*/\s*([\d\.E\+\-]+)')
+
     live_state = {}
     last_pass = {}
     pending_trades = {}
@@ -47,6 +50,15 @@ def parse_single_day_expi(acc_path, date_str):
                     if m:
                         try: live_state[market][key] = float(m.group(1))
                         except: pass
+                
+                # price 2 매칭 및 계산 (금액 1 / (금액 2 * 2))
+                m_p2 = price2_pattern.search(line)
+                if m_p2:
+                    try:
+                        val1 = float(m_p2.group(1))
+                        val2 = float(m_p2.group(2))
+                        live_state[market]['price'] = val1 / (val2 * 2) if val2 != 0 else 0
+                    except: pass
 
             if 'BID PASS 7 minus 2 candles' in line and market:
                 snapshot = live_state.get(market, {}).copy()
@@ -68,6 +80,11 @@ def parse_single_day_expi(acc_path, date_str):
                         trade_info = last_pass[mkt].copy()
                         trade_info['bid_time'] = current_dt
                         trade_info['invested_krw'] = float(order_data.get('price', 0))
+                        
+                        # 매수 시점의 가장 최신 price 정보 반영
+                        if mkt in live_state and 'price' in live_state[mkt]:
+                            trade_info['price'] = live_state[mkt]['price']
+                            
                         pending_trades[mkt] = trade_info
                 except: pass
 
@@ -77,39 +94,66 @@ def parse_single_day_expi(acc_path, date_str):
                 if price_match and market in pending_trades:
                     pending_trades[market]['bid_price_unit'] = float(price_match.group(1))
 
-            # 매도 주문 시 수량(volume) 추출
+            # 매도 시작 신호 포착
+            if 'ASK start' in line and market:
+                if market in pending_trades:
+                    pending_trades[market]['is_asking'] = True
+
+            # 실제 매도 단가 추출 (ASK start 이후의 trade price를 임시 저장)
+            if 'trade price' in line and market and 'bid' not in line:
+                if market in pending_trades and pending_trades[market].get('is_asking'):
+                    price_match = re.search(r'/\s*([\d\.]+)', line)
+                    if not price_match:
+                        price_match = re.search(r'price\s+([\d\.]+)\s+/', line)
+                    
+                    if price_match:
+                        pending_trades[market]['temp_ask_price'] = float(price_match.group(1))
+
+            # 매도 주문 JSON 로그가 찍힐 때 최종 확정
             if '"side":"ask"' in line:
                 try:
                     json_str = line.split(' - ')[-1]
                     order_data = json.loads(json_str)
                     mkt = order_data.get('market')
                     if mkt and mkt in pending_trades:
-                        pending_trades[mkt]['volume'] = float(order_data.get('volume', 0))
+                        trade = pending_trades.pop(mkt)
+                        volume = float(order_data.get('volume', 0))
+                        ask_price_unit = trade.get('temp_ask_price', 0)
+                        bid_unit = trade.get('bid_price_unit', 0)
+                        
+                        if bid_unit > 0 and ask_price_unit > 0:
+                            trade['profit_rate'] = (ask_price_unit - bid_unit) / bid_unit * 100
+                            trade['profit_krw'] = (ask_price_unit - bid_unit) * volume - (trade.get('invested_krw', 0) * 0.001)
+                            trade['result'] = 'ok' if ask_price_unit > bid_unit else 'x' if ask_price_unit < bid_unit else 'NB'
+                        else:
+                            trade['profit_rate'] = 0; trade['profit_krw'] = 0; trade['result'] = 'NB'
+                        
+                        trade['ask_price'] = ask_price_unit
+                        trade['volume'] = volume
+                        trade['timestamp'] = current_dt
+                        trade['date'] = clean_date_str
+                        final_data.append(trade)
+                        continue
                 except: pass
 
-            # 매도 결과 및 수익금 계산
+            # 기존 매도 결과 처리 로직 (백업용)
             ask_match = re.search(r'(up ask|down ask|highest ask)\s+(KRW-[A-Z0-9]+)', line)
             if ask_match:
-                result_type = ask_match.group(1)
                 mkt = ask_match.group(2)
-                prices = re.findall(r'/\s*([\d\.]+)', line)
-                ask_price_unit = float(prices[-1]) if prices else 0
-                
                 if mkt in pending_trades:
                     trade = pending_trades.pop(mkt)
+                    prices = re.findall(r'/\s*([\d\.]+)', line)
+                    ask_price_unit = float(prices[-1]) if prices else trade.get('temp_ask_price', 0)
+                    
                     bid_unit = trade.get('bid_price_unit', 0)
                     volume = trade.get('volume', 0)
                     
                     if bid_unit > 0 and ask_price_unit > 0:
-                        # 1. 수익률 (%)
                         trade['profit_rate'] = (ask_price_unit - bid_unit) / bid_unit * 100
-                        # 2. 수익금 (KRW) - 수수료 약 0.1% 반영
                         trade['profit_krw'] = (ask_price_unit - bid_unit) * volume - (trade.get('invested_krw', 0) * 0.001)
                         trade['result'] = 'ok' if ask_price_unit > bid_unit else 'x' if ask_price_unit < bid_unit else 'NB'
                     else:
-                        trade['profit_rate'] = 0
-                        trade['profit_krw'] = 0
-                        trade['result'] = 'NB'
+                        trade['profit_rate'] = 0; trade['profit_krw'] = 0; trade['result'] = 'NB'
                     
                     trade['ask_price'] = ask_price_unit
                     trade['timestamp'] = current_dt
@@ -118,9 +162,15 @@ def parse_single_day_expi(acc_path, date_str):
 
     if not final_data: return pd.DataFrame()
     result_df = pd.DataFrame(final_data)
-    cols = ['date', 'timestamp', 'market', 'result', 'profit_rate', 'profit_krw', 'invested_krw', 'PASS1_Ratio', 'BID5_Ratio', 
+    cols = ['date', 'timestamp', 'market', 'result', 'profit_rate', 'profit_krw', 'invested_krw', 'price', 'PASS1_Ratio', 'BID5_Ratio', 
             'wideTrendAvg', 'wideTrendAvg2', 'crossAvg', 'trendAvg', 'upRate', 'fastRate', 'bid_price_unit', 'ask_price', 'volume']
-    return result_df[[c for c in cols if c in result_df.columns]]
+    
+    # 필수 컬럼 보장
+    for c in cols:
+        if c not in result_df.columns:
+            result_df[c] = None
+            
+    return result_df[cols]
 
 def load_all_data(data_dir, date_list):
     all_dfs = []
