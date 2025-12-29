@@ -38,6 +38,7 @@ for f in files:
 available_dates = sorted(list(dates), reverse=True)
 
 st.sidebar.header("📅 데이터 로드")
+seed_money = st.sidebar.number_input("시작 자산 (KRW)", value=162982, step=1000)
 if not available_dates:
     st.sidebar.error(f"'{DATA_DIR}' 폴더에 로그 파일이 없습니다.")
 else:
@@ -91,23 +92,30 @@ if st.session_state.is_analyzed and not st.session_state.df.empty:
         )
 
     # 요약 지표
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
     ok_cnt = len(filtered_df[filtered_df['result']=='ok'])
     x_cnt = len(filtered_df[filtered_df['result']=='x'])
     total_cnt = len(filtered_df)
     win_rate = (ok_cnt / (ok_cnt + x_cnt) * 100) if (ok_cnt + x_cnt) > 0 else 0
+    avg_profit = filtered_df['profit_rate'].mean() if 'profit_rate' in filtered_df.columns else 0
+    
+    # 복리 및 실제 수익률 계산
+    total_profit_krw = filtered_df['profit_krw'].sum() if 'profit_krw' in filtered_df.columns else 0
+    actual_return = (total_profit_krw / seed_money * 100) if seed_money > 0 else 0
     
     c1.metric("Total", total_cnt)
     c2.metric("OK", ok_cnt)
     c3.metric("X", x_cnt)
     c4.metric("Win Rate", f"{win_rate:.1f}%")
+    c5.metric("Profit (KRW)", f"{total_profit_krw:,.0f}₩")
+    c6.metric("Actual Return", f"{actual_return:.2f}%")
     st.markdown("---")
 
     # 탭 구성
     tab1, tab2, tab3, tab4 = st.tabs(["📊 지표 분포", "🕸️ 패턴 찾기 (Parallel)", "🔍 상관관계", "📋 원본 데이터"])
 
     numeric_cols = [
-        'PASS1_Ratio', 'BID5_Ratio', 
+        'profit_rate', 'PASS1_Ratio', 'BID5_Ratio', 
         'wideTrendAvg', 'wideTrendAvg2', 'crossAvg', 
         'trendAvg', 'upRate', 'fastRate'
     ]
@@ -115,22 +123,23 @@ if st.session_state.is_analyzed and not st.session_state.df.empty:
 
     # [Tab 1] 지표 분포
     with tab1:
-        st.markdown("##### 📊 지표별 분포 (폰트 확대)")
-        sel_col = st.selectbox("지표 선택", target_cols)
-        if sel_col:
+        st.markdown("##### 📊 전체 지표별 분포")
+        
+        for sel_col in target_cols:
+            st.markdown(f"**🔍 {sel_col}**")
             c_h, c_b = st.columns(2)
             with c_h:
                 fig_h = px.histogram(filtered_df, x=sel_col, color="result", 
                                      barmode="overlay", color_discrete_map=COLOR_MAP, 
-                                     opacity=0.6, title="분포도")
-                # 글자 크기 키우기
-                fig_h.update_layout(font=dict(size=14))
+                                     opacity=0.6, title=f"{sel_col} 분포도")
+                fig_h.update_layout(font=dict(size=12), height=350)
                 st.plotly_chart(fig_h, use_container_width=True)
             with c_b:
                 fig_b = px.box(filtered_df, x="result", y=sel_col, color="result", 
-                               color_discrete_map=COLOR_MAP, title="범위 박스")
-                fig_b.update_layout(font=dict(size=14))
+                               color_discrete_map=COLOR_MAP, title=f"{sel_col} 범위 박스")
+                fig_b.update_layout(font=dict(size=12), height=350)
                 st.plotly_chart(fig_b, use_container_width=True)
+            st.markdown("---")
 
     # [Tab 2] Parallel Coordinates (수정됨: 아웃라이어 제거 옵션 추가)
     with tab2:
@@ -189,7 +198,7 @@ if st.session_state.is_analyzed and not st.session_state.df.empty:
             x=x_axis, y=y_axis, 
             color="result",
             color_discrete_map=COLOR_MAP,
-            hover_data=['market', 'timestamp', 'PASS1_Ratio', 'bid_price', 'ask_price'],
+            hover_data=['market', 'timestamp', 'profit_rate', 'bid_price_unit', 'ask_price'],
             title=f"{x_axis} vs {y_axis}"
         )
         # 글자 크기 키우기
