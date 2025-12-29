@@ -25,8 +25,17 @@ if 'is_analyzed' not in st.session_state:
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
-files = glob.glob(os.path.join(DATA_DIR, "acc_log.*.txt"))
-available_dates = sorted([f.split("acc_log.")[1].replace(".txt", "") for f in files], reverse=True)
+# 다양한 로그 확장자 대응 (.txt, .txt.log, .log)
+files = glob.glob(os.path.join(DATA_DIR, "acc_log.*"))
+dates = set()
+for f in files:
+    basename = os.path.basename(f)
+    # acc_log.YYYY-MM-DD... 형태에서 날짜만 추출
+    import re
+    match = re.search(r'acc_log\.(\d{4}-\d{2}-\d{2})', basename)
+    if match:
+        dates.add(match.group(1))
+available_dates = sorted(list(dates), reverse=True)
 
 st.sidebar.header("📅 데이터 로드")
 if not available_dates:
@@ -180,7 +189,7 @@ if st.session_state.is_analyzed and not st.session_state.df.empty:
             x=x_axis, y=y_axis, 
             color="result",
             color_discrete_map=COLOR_MAP,
-            hover_data=['market', 'timestamp', 'PASS1_Ratio'],
+            hover_data=['market', 'timestamp', 'PASS1_Ratio', 'bid_price', 'ask_price'],
             title=f"{x_axis} vs {y_axis}"
         )
         # 글자 크기 키우기
