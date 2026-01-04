@@ -130,7 +130,14 @@ def parse_single_day_expi(acc_path, date_str):
                         
                         trade['ask_price'] = ask_price_unit
                         trade['volume'] = volume
-                        trade['timestamp'] = current_dt
+                        
+                        # 타임스탬프를 매수 시점(bid_time)으로 고정하고 매도 시간은 별도 저장
+                        if 'bid_time' in trade:
+                            trade['timestamp'] = trade['bid_time']
+                            trade['sell_time'] = current_dt
+                        else:
+                            trade['timestamp'] = current_dt
+                            
                         trade['date'] = clean_date_str
                         final_data.append(trade)
                         continue
@@ -156,13 +163,20 @@ def parse_single_day_expi(acc_path, date_str):
                         trade['profit_rate'] = 0; trade['profit_krw'] = 0; trade['result'] = 'NB'
                     
                     trade['ask_price'] = ask_price_unit
-                    trade['timestamp'] = current_dt
+                    
+                    # 타임스탬프를 매수 시점(bid_time)으로 고정하고 매도 시간은 별도 저장
+                    if 'bid_time' in trade:
+                        trade['timestamp'] = trade['bid_time']
+                        trade['sell_time'] = current_dt
+                    else:
+                        trade['timestamp'] = current_dt
+
                     trade['date'] = clean_date_str
                     final_data.append(trade)
 
     if not final_data: return pd.DataFrame()
     result_df = pd.DataFrame(final_data)
-    cols = ['date', 'timestamp', 'market', 'result', 'profit_rate', 'profit_krw', 'invested_krw', 'price', 'PASS1_Ratio', 'BID5_Ratio', 
+    cols = ['date', 'timestamp', 'sell_time', 'market', 'result', 'profit_rate', 'profit_krw', 'invested_krw', 'price', 'PASS1_Ratio', 'BID5_Ratio', 'bid5_24h', 
             'wideTrendAvg', 'wideTrendAvg2', 'crossAvg', 'trendAvg', 'upRate', 'fastRate', 'bid_price_unit', 'ask_price', 'volume']
     
     # 필수 컬럼 보장
