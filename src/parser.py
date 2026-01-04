@@ -27,6 +27,7 @@ def parse_single_day_expi(acc_path, date_str):
     last_pass = {}
     pending_trades = {}
     final_data = []
+    last_val = None  # 마켓 없이 찍히는 val 임시 보관
 
     if not os.path.exists(acc_path): 
         return pd.DataFrame()
@@ -35,6 +36,13 @@ def parse_single_day_expi(acc_path, date_str):
         for line in f:
             line = line.strip()
             if not line: continue
+
+            # val 추출 (마켓 정보가 없을 수 있으므로 별도 처리)
+            val_match = re.search(r'val\s*:\s*([\d\.E\+\-]+)', line)
+            if val_match:
+                try:
+                    last_val = float(val_match.group(1)) * 100
+                except: pass
 
             time_match = re.search(r'\[(\d{2}:\d{2}:\d{2}\.\d{3})\]', line)
             if not time_match: continue
@@ -64,6 +72,7 @@ def parse_single_day_expi(acc_path, date_str):
                 snapshot = live_state.get(market, {}).copy()
                 snapshot['market'] = market
                 snapshot['pass_time'] = current_dt
+                snapshot['val'] = last_val  # 가장 최근의 val 저장
                 p1_c = snapshot.get('pass1_cur', 0); p1_a = snapshot.get('pass1_avg', 0)
                 snapshot['PASS1_Ratio'] = p1_c / p1_a if p1_a != 0 else 0
                 b5_p = snapshot.get('bid5_prev', 0); b5_24 = snapshot.get('bid5_24h', 0)
@@ -176,7 +185,7 @@ def parse_single_day_expi(acc_path, date_str):
 
     if not final_data: return pd.DataFrame()
     result_df = pd.DataFrame(final_data)
-    cols = ['date', 'timestamp', 'sell_time', 'market', 'result', 'profit_rate', 'profit_krw', 'invested_krw', 'price', 'PASS1_Ratio', 'BID5_Ratio', 'bid5_24h', 
+    cols = ['date', 'timestamp', 'sell_time', 'market', 'result', 'profit_rate', 'profit_krw', 'invested_krw', 'price', 'PASS1_Ratio', 'BID5_Ratio', 'bid5_24h',
             'wideTrendAvg', 'wideTrendAvg2', 'crossAvg', 'trendAvg', 'upRate', 'fastRate', 'bid_price_unit', 'ask_price', 'volume']
     
     # 필수 컬럼 보장

@@ -10,7 +10,7 @@ from src.parser import load_all_data
 
 st.set_page_config(layout="wide", page_title="부자의 트레이딩 분석기 (Expi)")
 
-st.title("🧪 전략 시뮬레이션 분석기 (Expi Mode)")
+st.title("🧪 테스트(Expi Mode)")
 st.markdown("---")
 
 DATA_DIR = "data"
@@ -125,7 +125,7 @@ if st.session_state.is_analyzed and not st.session_state.df.empty:
     numeric_cols = [
         'profit_rate', 'PASS1_Ratio', 'BID5_Ratio', 
         'wideTrendAvg', 'wideTrendAvg2', 'crossAvg', 
-        'trendAvg', 'upRate', 'fastRate'
+        'trendAvg', 'val', 'upRate', 'fastRate'
     ]
     target_cols = [c for c in numeric_cols if c in filtered_df.columns]
 
